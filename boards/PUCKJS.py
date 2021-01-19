@@ -30,12 +30,12 @@ info = {
    'libraries' : [
      'BLUETOOTH',
      'NET',
-     'GRAPHICS',
+     #'GRAPHICS',
      'CRYPTO','SHA256','SHA512',
      'AES',
      'NFC',
-     'NEOPIXEL',
-     #'FILESYSTEM'
+     #'NEOPIXEL',
+     'FILESYSTEM'
      #'TLS'
    ],
    'makefile' : [
