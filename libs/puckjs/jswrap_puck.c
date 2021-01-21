@@ -333,11 +333,12 @@ void mag_off() {
   nrf_gpio_cfg_output(MAG_PIN_PWR);
 }
 
-bool accel_on(int milliHz) {
+bool accel_on(JsVarFloat milliHz, bool fifo_mode, JsVarInt fifo_threshold) {
   // CTRL1_XL / CTRL2_G
+
   int reg = 0;
   bool gyro = true;
-  if (milliHz<12500) { // 1.6Hz, no gyro
+  if (milliHz<12500 && !fifo_mode) { // 1.6Hz, no gyro and not allowed in fifo mode
     reg = 11<<4;
     gyro = false;
   } else if (milliHz==12500) reg=1<<4; // 12.5 Hz (low power)
@@ -378,105 +379,42 @@ bool accel_on(int milliHz) {
   jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
   buf[0] = 0x12; buf[1]=0x44; // CTRL3_C, BDU, irq active high, push pull, auto-inc
   jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-  buf[0] = 0x0D; buf[1]=3; // INT1_CTRL - Gyro/accel data ready IRQ
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+
+  if (!fifo_mode) {
+    buf[0] = 0x0D; buf[1]=3; // INT1_CTRL - Gyro/accel data ready IRQ
+    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  } else { // fifo mode
+    buf[0] = 0x08; buf[1]=0b00001001; // FIFO_CTRL3 - No decimation of accelerometer or gyro
+    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+
+    buf[0] = 0x0D; buf[1]=0x8; // INT1_CTRL - Enable FIFO threshold interrupt
+    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+
+    // Set up ODR and FIFO mode
+    buf[0] = 0x0a;
+    uint8_t fifo_continuous = 0x6; // Only supported mode for now
+    if (milliHz==12500) buf[1]=1<<3 | fifo_continuous; // 12.5 Hz
+    else if (milliHz==26000) buf[1]=2<<3 | fifo_continuous; // 26 Hz
+    else if (milliHz==52000) buf[1]=3<<3 | fifo_continuous; // 52 Hz
+    else if (milliHz==104000) buf[1]=4<<3 | fifo_continuous; // 104 Hz
+    else if (milliHz==208000) buf[1]=5<<3 | fifo_continuous; // 208 Hz
+    else if (milliHz==416000) buf[1]=6<<3 | fifo_continuous; // 416 Hz
+    else if (milliHz==833000) buf[1]=7<<3 | fifo_continuous; // 833 Hz
+    else if (milliHz==1660000) buf[1]=8<<3 | fifo_continuous; // 1.66 kHz
+    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+
+    buf[0] = 0x06;
+    buf[1] = fifo_threshold & 0xFF; // FIFO_CTRL1 - FIFO threshold bit 7..0. Unit is words (16 bit) in FIFO.
+    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+
+    buf[0] = 0x07;
+    buf[1] = ((fifo_threshold >> 8) & 0x7); // FIFO_CTRL2 - FIFO threshold bit 10..8. Others ok at default (0) value
+    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+
+  }
 
   return true;
 }
-
-bool accel_on_fifo(int milliHz) {
-  // CTRL1_XL / CTRL2_G
-  int reg = 0;
-  bool gyro = true;
-  if (milliHz<12500) { // 1.6Hz, no gyro
-    reg = 11<<4;
-    gyro = false;
-  } else if (milliHz==12500) reg=1<<4; // 12.5 Hz (low power)
-  else if (milliHz==26000) reg=2<<4; // 26 Hz (low power)
-  else if (milliHz==52000) reg=3<<4; // 52 Hz (low power)
-  else if (milliHz==104000) reg=4<<4; // 104 Hz (normal mode)
-  else if (milliHz==208000) reg=5<<4; // 208 Hz (normal mode)
-  else if (milliHz==416000) reg=6<<4; // 416 Hz (high performance)
-  else if (milliHz==833000) reg=7<<4; // 833 Hz (high performance)
-  else if (milliHz==1660000) reg=8<<4; // 1.66 kHz (high performance)
-  else return false;
-
-
-  jshPinSetState(ACCEL_PIN_INT, JSHPINSTATE_GPIO_IN);
-#ifdef ACCEL_PIN_PWR
-  jshPinSetState(ACCEL_PIN_PWR, JSHPINSTATE_GPIO_OUT);
-#endif
-  jshPinSetState(ACCEL_PIN_SCL, JSHPINSTATE_GPIO_OUT_OPENDRAIN_PULLUP);
-  jshPinSetState(ACCEL_PIN_SDA, JSHPINSTATE_GPIO_OUT_OPENDRAIN_PULLUP);
-#ifdef ACCEL_PIN_PWR
-  jshPinSetValue(ACCEL_PIN_PWR, 1);
-#endif
-  jshPinSetValue(ACCEL_PIN_SCL, 1);
-  jshPinSetValue(ACCEL_PIN_SDA, 1);
-  jshDelayMicroseconds(20000); // 20ms boot from app note
-
-  // LSM6DS3TR
-  unsigned char buf[2];
-
-  // ERBO additions
-  buf[0] = 0x08; buf[1]=0b00001001; // FIFO_CTRL3 - No decimation of accelerometer or gyro
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-
-
-  // Set up FIFO threshold (when interrupt is triggered)
-  // Unit is words (16 bit) in FIFO.
-  // Aim for reading data every 0.5 s. That means that we want the threshold at 104*3*2 = 624 words.
-
-  buf[0] = 0x06;
-  buf[1] = 624 & 0xFF; // FIFO_CTRL1 - FIFO threshold bit 7..0. Unit is words (16 bit) in FIFO.
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-
-  buf[0] = 0x07;
-  buf[1] = ((624 >> 8) & 0x7); // FIFO_CTRL2 - FIFO threshold bit 10..8. Others ok at default (0) value
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-
-  // END ERBO ADDITIONS
-
-  buf[0] = 0x15; buf[1]=0x10; // CTRL6-C - XL_HM_MODE=1, low power accelerometer
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-  buf[0] = 0x16; buf[1]=0x80; //  CTRL6-C - G_HM_MODE=1, low power gyro
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-  buf[0] = 0x18; buf[1]=0x38; // CTRL9_XL  Acc X, Y, Z axes enabled
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-  buf[0] = 0x10; buf[1]=reg | 0b00001011; // CTRL1_XL Accelerometer, +-4g, 50Hz AA filter
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-  buf[0] = 0x11; buf[1]=gyro ? reg : 0; // CTRL2_G  Gyro, 250 dps, no 125dps limit
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-  buf[0] = 0x12; buf[1]=0x44; // CTRL3_C, BDU, irq active high, push pull, auto-inc
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-  // ERBO MODIFICATION
-  //buf[0] = 0x0D; buf[1]=3; // INT1_CTRL - Gyro/accel data ready IRQ
-  buf[0] = 0x0D; buf[1]=0x8; // INT1_CTRL - Enable FIFO threshold interrupt
-
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-
-  buf[0] = 0x0a; buf[1]=0b00101110; // FIFO_CTRL5 - FIFO ODR = 208 Hz (should be configurable) and continuous mode
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-
-  return true;
-}
-
-/*
-  Clear the fifo, discarding the data
-*/
-// void accel_clear_fifo() {
-//   unsigned char buf[2];
-//   uint16_t numWordsInFifo = 0;
-//   buf[0] = 0x3a; // FIFO_STATUS1
-//   jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
-//   jsi2cRead(&i2cAccel, ACCEL_ADDR, 2, buf, true);
-//   numWordsInFifo = ((buf[1] & 0x7) <<8) | buf[0];
-
-//   unsigned char fifo_contents[numWordsInFifo*2];
-//   fifo_contents[0] = 0x3e;
-//   jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, fifo_contents, false);
-//   jsi2cRead(&i2cAccel, ACCEL_ADDR, numWordsInFifo*2, fifo_contents, true);
-// }
 
 /*
   Read all complete samples in the FIFO, returning it as an ArrayBuffer.
@@ -875,13 +813,14 @@ JsVarFloat jswrap_puck_getTemperature() {
   "ifdef" : "PUCKJS",
   "generate" : "jswrap_puck_accelOn",
   "params" : [
-      ["samplerate","float","The sample rate in Hz, or undefined"]
+      ["samplerate","float","The sample rate in Hz, or undefined"],
+      ["fifo_enable","bool","If FIFO mode should be used"],
+      ["fifo_threshold","int","FIFO threshold in bytes"]
   ]
 }
-
 Accepted values are:
 
-* 1.6 Hz (no Gyro) - 40uA (2v05 and later firmware)
+* 1.6 Hz (no Gyro) - 40uA (2v05 and later firmware, no in FIFO mode)
 * 12.5 Hz (with Gyro)- 350uA
 * 26 Hz (with Gyro) - 450 uA
 * 52 Hz (with Gyro) - 600 uA
@@ -891,7 +830,11 @@ Accepted values are:
 * 833 Hz (with Gyro) (not recommended)
 * 1660 Hz (with Gyro) (not recommended)
 
-Once `Puck.accelOn()` is called, the `Puck.accel` event will be called each time data is received. `Puck.accelOff()` can be called to turn the accelerometer off.
+Once `Puck.accelOn()` is called, the `Puck.accel` event will be called each time data is received. If FIFO mode is disabled, the event
+will be called as soon as a new measurement it ready. If FIFO mode is enabled, it instead be fired then the FIFO has reach the specified
+threshold.
+
+`Puck.accelOff()` can be called to turn the accelerometer off.
 
 For instance to light the red LED whenever Puck.js is face up:
 
@@ -902,68 +845,25 @@ Puck.on('accel', function(d) {
 Puck.accelOn();
 ```
 
-Check out [the Puck.js page on the accelerometer](http://www.espruino.com/Puck.js#on-board-peripherals)
-for more information.
+When used in FIFO mode, the object passed with the accel event will be a Uint8Array containing all the samples read from the FIFO.
 
-*/
-void jswrap_puck_accelOn(JsVarFloat hz) {
-  if (!isPuckV2) {
-    jsExceptionHere(JSET_ERROR, "Not available on Puck.js v1");
-    return;
-  }
-  if (accel_enabled) {
-    jswrap_puck_accelOff();
-    // wait 1ms for power-off
-    jshDelayMicroseconds(1000);
-  }
-  int milliHz = (int)((hz*1000)+0.5);
-  if (milliHz==0) milliHz=12500;
-  if (!accel_on(milliHz)) {
-    jsExceptionHere(JSET_ERROR, "Invalid sample rate %f - must be 1660, 833, 416, 208, 104, 52, 26, 12.5, 1.6 Hz", hz);
-  }
-  jshPinWatch(ACCEL_PIN_INT, true);
-  accel_enabled = true;
-}
-
-/*JSON{
-  "type" : "staticmethod",
-  "class" : "Puck",
-  "name" : "accelOnFifo",
-  "ifdef" : "PUCKJS",
-  "generate" : "jswrap_puck_accelOnFifo",
-  "params" : [
-      ["samplerate","float","The sample rate in Hz, or undefined"]
-  ]
-}
-
-Accepted values are:
-
-* 1.6 Hz (no Gyro) - 40uA (2v05 and later firmware)
-* 12.5 Hz (with Gyro)- 350uA
-* 26 Hz (with Gyro) - 450 uA
-* 52 Hz (with Gyro) - 600 uA
-* 104 Hz (with Gyro) - 900 uA
-* 208 Hz (with Gyro) - 1500 uA
-* 416 Hz (with Gyro) (not recommended)
-* 833 Hz (with Gyro) (not recommended)
-* 1660 Hz (with Gyro) (not recommended)
-
-Once `Puck.accelOnFifo()` is called, the `Puck.accel` event will be called each time the fifo threshold is reached. `Puck.accelOff()` can be called to turn the accelerometer off.
-
-FIXME:For instance to light the red LED whenever Puck.js is face up:
+An example of how to use FIFO mode:
 
 ```
 Puck.on('accel', function(d) {
- digitalWrite(LED1, a.acc.z > 0);
+  console.log('bytes read from FIFO', d.length);
+}
 });
-Puck.accelOn();
+Puck.accelOn(208, true, 624);
 ```
+
+This will enable sampling at 208 Hz, and the threshold is set to 624 words which equal 104 samples. So an event will be triggered every 0.5 s.
 
 Check out [the Puck.js page on the accelerometer](http://www.espruino.com/Puck.js#on-board-peripherals)
 for more information.
 
 */
-void jswrap_puck_accelOnFifo(JsVarFloat hz) {
+void jswrap_puck_accelOn(JsVarFloat hz, bool fifo_mode, JsVarInt fifo_threshold) {
   if (!isPuckV2) {
     jsExceptionHere(JSET_ERROR, "Not available on Puck.js v1");
     return;
@@ -975,12 +875,13 @@ void jswrap_puck_accelOnFifo(JsVarFloat hz) {
   }
   int milliHz = (int)((hz*1000)+0.5);
   if (milliHz==0) milliHz=12500;
-  if (!accel_on_fifo(milliHz)) {
+
+  if (!accel_on(milliHz, fifo_mode, fifo_threshold)) {
     jsExceptionHere(JSET_ERROR, "Invalid sample rate %f - must be 1660, 833, 416, 208, 104, 52, 26, 12.5, 1.6 Hz", hz);
   }
+  accel_fifo_mode = fifo_mode ? true : false;
   jshPinWatch(ACCEL_PIN_INT, true);
   accel_enabled = true;
-  accel_fifo_mode = true;
 }
 
 /*JSON{
@@ -1005,6 +906,7 @@ void jswrap_puck_accelOff() {
     accel_off();
   }
   accel_enabled = false;
+  accel_fifo_mode = false;
 }
 
 /*JSON{
@@ -1028,7 +930,7 @@ JsVar *jswrap_puck_accel() {
   /* If not enabled, turn on and read. If enabled,
    * just pass out the last reading */
   if (!accel_enabled) {
-    accel_on(1660000);
+    accel_on(1660000, false, 0);
     accel_wait();
     accel_read();
     accel_off();
@@ -1475,7 +1377,7 @@ bool jswrap_puck_selfTest() {
   }
 
   if (isPuckV2) {
-    accel_on(1660000);
+    accel_on(1660000, false, 0);
     unsigned char buf[1];
     buf[0] = 0x0F; // WHOAMI
     jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
@@ -1689,8 +1591,11 @@ bool jswrap_puck_idle() {
           jsiQueueObjectCallbacks(puck, JS_EVENT_PREFIX"accel", &d, 1);
       jsvUnLock2(puck, d);
       busy = true;
-    } else {
+    } else { // In FIFO mode
       JsVar * d = accel_read_fifo();
+      if (!d) {
+        jsiConsolePrintf("Error emptying FIFO\n");
+      }
       JsVar *puck = jsvObjectGetChild(execInfo.root, "Puck", 0);
       if (jsvHasChildren(puck))
           jsiQueueObjectCallbacks(puck, JS_EVENT_PREFIX"accel", &d, 1);
