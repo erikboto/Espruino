@@ -356,39 +356,39 @@ bool accel_on(JsVarFloat milliHz, bool fifo_mode, JsVarInt fifo_threshold) {
 #ifdef ACCEL_PIN_PWR
   jshPinSetState(ACCEL_PIN_PWR, JSHPINSTATE_GPIO_OUT);
 #endif
-  jshPinSetState(ACCEL_PIN_SCL, JSHPINSTATE_GPIO_OUT_OPENDRAIN_PULLUP);
-  jshPinSetState(ACCEL_PIN_SDA, JSHPINSTATE_GPIO_OUT_OPENDRAIN_PULLUP);
+  //jshPinSetState(ACCEL_PIN_SCL, JSHPINSTATE_GPIO_OUT_OPENDRAIN_PULLUP);
+  //jshPinSetState(ACCEL_PIN_SDA, JSHPINSTATE_GPIO_OUT_OPENDRAIN_PULLUP);
 #ifdef ACCEL_PIN_PWR
   jshPinSetValue(ACCEL_PIN_PWR, 1);
 #endif
-  jshPinSetValue(ACCEL_PIN_SCL, 1);
-  jshPinSetValue(ACCEL_PIN_SDA, 1);
+  //jshPinSetValue(ACCEL_PIN_SCL, 1);
+  //jshPinSetValue(ACCEL_PIN_SDA, 1);
   jshDelayMicroseconds(20000); // 20ms boot from app note
 
   // LSM6DS3TR
   unsigned char buf[2];
   buf[0] = 0x15; buf[1]=0x10; // CTRL6-C - XL_HM_MODE=1, low power accelerometer
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
   buf[0] = 0x16; buf[1]=0x80; //  CTRL6-C - G_HM_MODE=1, low power gyro
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
   buf[0] = 0x18; buf[1]=0x38; // CTRL9_XL  Acc X, Y, Z axes enabled
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
   buf[0] = 0x10; buf[1]=reg | 0b00001011; // CTRL1_XL Accelerometer, +-4g, 50Hz AA filter
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
   buf[0] = 0x11; buf[1]=gyro ? reg : 0; // CTRL2_G  Gyro, 250 dps, no 125dps limit
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
   buf[0] = 0x12; buf[1]=0x44; // CTRL3_C, BDU, irq active high, push pull, auto-inc
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 
   if (!fifo_mode) {
     buf[0] = 0x0D; buf[1]=3; // INT1_CTRL - Gyro/accel data ready IRQ
-    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+    jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
   } else { // fifo mode
     buf[0] = 0x08; buf[1]=0b00001001; // FIFO_CTRL3 - No decimation of accelerometer or gyro
-    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+    jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 
     buf[0] = 0x0D; buf[1]=0x8; // INT1_CTRL - Enable FIFO threshold interrupt
-    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+    jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 
     // Set up ODR and FIFO mode
     buf[0] = 0x0a;
@@ -401,15 +401,15 @@ bool accel_on(JsVarFloat milliHz, bool fifo_mode, JsVarInt fifo_threshold) {
     else if (milliHz==416000) buf[1]=6<<3 | fifo_continuous; // 416 Hz
     else if (milliHz==833000) buf[1]=7<<3 | fifo_continuous; // 833 Hz
     else if (milliHz==1660000) buf[1]=8<<3 | fifo_continuous; // 1.66 kHz
-    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+    jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 
     buf[0] = 0x06;
     buf[1] = fifo_threshold & 0xFF; // FIFO_CTRL1 - FIFO threshold bit 7..0. Unit is words (16 bit) in FIFO.
-    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+    jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 
     buf[0] = 0x07;
     buf[1] = ((fifo_threshold >> 8) & 0x7); // FIFO_CTRL2 - FIFO threshold bit 10..8. Others ok at default (0) value
-    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+    jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 
   }
 
@@ -424,8 +424,9 @@ JsVar* accel_read_fifo() {
   uint16_t numWordsInFifo = 0;
   uint16_t samplesToRead = 0;
   buf[0] = 0x3a; // FIFO_STATUS1
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
-  jsi2cRead(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 1, buf, false);
+  jshI2CRead(EV_I2C1, ACCEL_ADDR, 2, buf, true);
+
   numWordsInFifo = ((buf[1] & 0x7) <<8) | buf[0];
 
   // Only get full sets of samples (3 words accel + 3 words gyro)
@@ -435,19 +436,30 @@ JsVar* accel_read_fifo() {
     return 0;
   }
 
-  JsVar *dst = 0;
-  JsVar *arr = jsvNewArrayBufferWithPtr((unsigned int)samplesToRead*6*2, (char**)&dst);
+  uint16_t bytesToRead = samplesToRead*6*2;
+
+  unsigned char *dst = 0;
+  JsVar *arr = jsvNewArrayBufferWithPtr((unsigned int)bytesToRead, (char**)&dst);
   if (!dst) {
     jsvUnLock(arr);
     jsError("Could not allocate memory for emptying FIFO");
     return 0;
   }
+  
+  uint16_t bytesRead = 0;
 
-  // Read samplesToRead * 6 (3 words gyro + 3 words accel) * 2 (two bytes per word) bytes
-  unsigned char fifo_read_addr[1];
-  fifo_read_addr[0] = 0x3e;
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, fifo_read_addr, false);
-  jsi2cRead(&i2cAccel, ACCEL_ADDR, samplesToRead*6*2, (unsigned char *)dst, true);
+  // We can only read <254 bytes at a time when using HW I2C
+  do {
+    uint8_t chunk = bytesToRead > 254 ? 254 : bytesToRead;
+
+    // Read samplesToRead * 6 (3 words gyro + 3 words accel) * 2 (two bytes per word) bytes
+    unsigned char fifo_read_addr[1];
+    fifo_read_addr[0] = 0x3e;
+    jshI2CWrite(EV_I2C1, ACCEL_ADDR, 1, fifo_read_addr, false);
+    jshI2CRead(EV_I2C1, ACCEL_ADDR, chunk, (unsigned char *)&dst[bytesRead], true);
+    bytesRead += chunk;
+    bytesToRead -= chunk;
+  } while (bytesToRead > 0 );
 
   return arr;
 }
@@ -456,8 +468,8 @@ JsVar* accel_read_fifo() {
 void accel_read() {
   unsigned char buf[12];
   buf[0] = 0x22; // OUTX_L_G
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
-  jsi2cRead(&i2cAccel, ACCEL_ADDR, 12, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 1, buf, false);
+  jshI2CRead(EV_I2C1, ACCEL_ADDR, 12, buf, true);
   gyro_reading[0] = (buf[1]<<8) | buf[0];
   gyro_reading[1] = (buf[3]<<8) | buf[2];
   gyro_reading[2] = (buf[5]<<8) | buf[4];
@@ -472,8 +484,8 @@ void accel_wait() {
   timeout = 400;
   do {
     buf[0] = 0x1E; // STATUS_REG
-    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
-    jsi2cRead(&i2cAccel, ACCEL_ADDR, 1, buf, true);
+    jshI2CWrite(EV_I2C1, ACCEL_ADDR, 1, buf, false);
+    jshI2CRead(EV_I2C1, ACCEL_ADDR, 1, buf, true);
     //jsiConsolePrintf("M %d\n", buf[0]);
   } while (!(buf[0]&3) && --timeout); // ZYXDA
   if (!timeout) jsExceptionHere(JSET_INTERNALERROR, "Timeout (Accelerometer)");
@@ -490,9 +502,9 @@ void accel_off() {
 #else
   unsigned char buf[2];
   buf[0] = 0x10; buf[1]=0; // CTRL1_XL  - power down
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
   buf[0] = 0x11; buf[1]=0; // CTRL2_G   - power down
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 #endif
 }
 
@@ -965,7 +977,7 @@ void jswrap_puck_accelWr(JsVarInt reg, JsVarInt data) {
   unsigned char buf[2];
   buf[0] = (unsigned char)reg;
   buf[1] = (unsigned char)data;
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 2, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 }
 
 /*JSON{
@@ -991,8 +1003,8 @@ int jswrap_puck_accelRd(JsVarInt reg) {
   }
   unsigned char buf[1];
   buf[0] = (unsigned char)reg;
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
-  jsi2cRead(&i2cAccel, ACCEL_ADDR, 1, buf, true);
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 1, buf, false);
+  jshI2CRead(EV_I2C1, ACCEL_ADDR, 1, buf, true);
   return buf[0];
 }
 
@@ -1380,8 +1392,8 @@ bool jswrap_puck_selfTest() {
     accel_on(1660000, false, 0);
     unsigned char buf[1];
     buf[0] = 0x0F; // WHOAMI
-    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
-    jsi2cRead(&i2cAccel, ACCEL_ADDR, 1, buf, true);
+    jshI2CWrite(EV_I2C1, ACCEL_ADDR, 1, buf, false);
+    jshI2CRead(EV_I2C1, ACCEL_ADDR, 1, buf, true);
     accel_off();
     if (buf[0]!=106) {
       if (!err[0]) strcpy(err,"ACC");
@@ -1463,6 +1475,8 @@ void jswrap_puck_init() {
   i2cAccel.pinSDA = ACCEL_PIN_SDA;
   i2cAccel.pinSCL = ACCEL_PIN_SCL;
   i2cAccel.clockStretch = false;
+  jshI2CSetup(EV_I2C1, &i2cAccel);
+
   jshI2CInitInfo(&i2cTemp);
   i2cTemp.bitrate = 0x7FFFFFFF; // make it as fast as we can go
   i2cTemp.pinSDA = TEMP_PIN_SDA;
