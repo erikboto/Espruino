@@ -387,20 +387,20 @@ bool accel_on(JsVarFloat milliHz, bool fifo_mode, JsVarInt fifo_threshold) {
     buf[0] = 0x08; buf[1]=0b00001001; // FIFO_CTRL3 - No decimation of accelerometer or gyro
     jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 
-    buf[0] = 0x0D; buf[1]=0x8; // INT1_CTRL - Enable FIFO threshold interrupt
+    buf[0] = 0x0D; buf[1]=0x28; // INT1_CTRL - Enable FIFO threshold and FIFO full interrupts
     jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 
     // Set up ODR and FIFO mode
     buf[0] = 0x0a;
-    uint8_t fifo_continuous = 0x6; // Only supported mode for now
-    if (milliHz==12500) buf[1]=1<<3 | fifo_continuous; // 12.5 Hz
-    else if (milliHz==26000) buf[1]=2<<3 | fifo_continuous; // 26 Hz
-    else if (milliHz==52000) buf[1]=3<<3 | fifo_continuous; // 52 Hz
-    else if (milliHz==104000) buf[1]=4<<3 | fifo_continuous; // 104 Hz
-    else if (milliHz==208000) buf[1]=5<<3 | fifo_continuous; // 208 Hz
-    else if (milliHz==416000) buf[1]=6<<3 | fifo_continuous; // 416 Hz
-    else if (milliHz==833000) buf[1]=7<<3 | fifo_continuous; // 833 Hz
-    else if (milliHz==1660000) buf[1]=8<<3 | fifo_continuous; // 1.66 kHz
+    uint8_t fifo_mode = 0x1; // Only supported mode for now 0x6 = continous, 0x1 = fifo
+    if (milliHz==12500) buf[1]=1<<3 | fifo_mode; // 12.5 Hz
+    else if (milliHz==26000) buf[1]=2<<3 | fifo_mode; // 26 Hz
+    else if (milliHz==52000) buf[1]=3<<3 | fifo_mode; // 52 Hz
+    else if (milliHz==104000) buf[1]=4<<3 | fifo_mode; // 104 Hz
+    else if (milliHz==208000) buf[1]=5<<3 | fifo_mode; // 208 Hz
+    else if (milliHz==416000) buf[1]=6<<3 | fifo_mode; // 416 Hz
+    else if (milliHz==833000) buf[1]=7<<3 | fifo_mode; // 833 Hz
+    else if (milliHz==1660000) buf[1]=8<<3 | fifo_mode; // 1.66 kHz
     jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
 
     buf[0] = 0x06;
@@ -416,6 +416,25 @@ bool accel_on(JsVarFloat milliHz, bool fifo_mode, JsVarInt fifo_threshold) {
   return true;
 }
 
+void reset_fifo() {
+  jsiConsolePrintf("in fifo_reset\r\n");
+  // Read fifo status, so we can restore it after reset
+  unsigned char prev_status;
+  unsigned char buf[2];
+  buf[0] = 0x0a;
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 1, buf, false);
+  jshI2CRead(EV_I2C1, ACCEL_ADDR, 1, &prev_status, true);
+
+  // Reset by setting fifo mode to bypass
+  buf[0] = 0x0a;
+  buf[1] = 0;
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
+
+  // Restore fifo settings again
+  buf[1] = prev_status;
+  jshI2CWrite(EV_I2C1, ACCEL_ADDR, 2, buf, true);
+}
+
 /*
   Read all complete samples in the FIFO, returning it as an ArrayBuffer.
 */
@@ -429,6 +448,13 @@ JsVar* accel_read_fifo() {
 
   numWordsInFifo = ((buf[1] & 0x7) <<8) | buf[0];
 
+  // If fifo is full, we need to restart collection after reading the data available in FIFO
+  uint8_t fifo_full = (buf[1] & 0x60);
+
+  if (fifo_full) {
+    jsiConsolePrintf("Warning: FIFO was full and samples might be lost, FIFO will be reset.\r\n");
+  }
+
   // Only get full sets of samples (3 words accel + 3 words gyro)
   samplesToRead = (uint16_t)numWordsInFifo / 6;
 
@@ -437,15 +463,16 @@ JsVar* accel_read_fifo() {
   }
 
   uint16_t bytesToRead = samplesToRead*6*2;
+  uint16_t bytesToAllocate = fifo_full ? bytesToRead + 12 : bytesToRead;
 
   unsigned char *dst = 0;
-  JsVar *arr = jsvNewArrayBufferWithPtr((unsigned int)bytesToRead, (char**)&dst);
+  JsVar *arr = jsvNewArrayBufferWithPtr((unsigned int)bytesToAllocate, (char**)&dst);
   if (!dst) {
     jsvUnLock(arr);
     jsError("Could not allocate memory for emptying FIFO");
     return 0;
   }
-  
+
   uint16_t bytesRead = 0;
 
   // We can only read <254 bytes at a time when using HW I2C
@@ -460,6 +487,14 @@ JsVar* accel_read_fifo() {
     bytesRead += chunk;
     bytesToRead -= chunk;
   } while (bytesToRead > 0 );
+
+  if (fifo_full) {
+    // Insert a full sample of 0xFFFF axis in buffer, to indicate that there is a
+    // gap in the recorded data.
+    memset(&dst[bytesRead], 0xFF, 12);
+
+    reset_fifo();
+  }
 
   return arr;
 }
