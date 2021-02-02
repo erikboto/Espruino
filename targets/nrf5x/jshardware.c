@@ -23,7 +23,7 @@
   TIMER4 used for NFCT library on nRF52
   SPI0 / TWI0 -> Espruino's SPI1 (only nRF52 - not enough flash on 51)
   SPI1 / TWI1 -> Espruino's I2C1
-  SPI2 -> free
+  SPI2 -> TWI2 -> Espruino's SPI2 (only nRF52 - not enough flash on 51)
 
  */
 
@@ -286,14 +286,18 @@ volatile bool nrf_analog_read_interrupted = false;
 #endif
 
 static nrf_drv_spi_t spi0 = NRF_DRV_SPI_INSTANCE(0);
+static nrf_drv_spi_t spi2 = NRF_DRV_SPI_INSTANCE(2);
 bool spi0Initialised = false;
-unsigned char *spi0RxPtr;
-unsigned char *spi0TxPtr;
-size_t spi0Cnt;
+bool spi2Initialised = false;
+unsigned char *spi0RxPtr, *spi2RxPtr;
+unsigned char *spi0TxPtr, *spi2TxPtr;
+size_t spi0Cnt, spi2Cnt;
 
 // Handler for async SPI transfers
 volatile bool spi0Sending = false;
+volatile bool spi2Sending = false;
 void (*volatile spi0Callback)() = NULL;
+void (*volatile spi2Callback)() = NULL;
 void spi0EvtHandler(nrf_drv_spi_evt_t const * p_event
 #if NRF_SD_BLE_API_VERSION>=5
                       ,void *                    p_context
@@ -332,7 +336,47 @@ void spi0EvtHandler(nrf_drv_spi_evt_t const * p_event
     spi0Callback=NULL;
   }
 }
+
+void spi2EvtHandler(nrf_drv_spi_evt_t const * p_event
+#if NRF_SD_BLE_API_VERSION>=5
+                      ,void *                    p_context
 #endif
+                      ) {
+  /* SPI can only send max 255 bytes at once, so we
+   * have to use the IRQ to fire off the next send */
+  if (spi2Cnt>0) {
+    size_t c = spi2Cnt;
+    if (c>SPI_MAXAMT) c=SPI_MAXAMT;
+    unsigned char *tx = spi2TxPtr;
+    unsigned char *rx = spi2RxPtr;
+    spi2Cnt -= c;
+    if (spi2TxPtr) spi2TxPtr += c;
+    if (spi2RxPtr) spi2RxPtr += c;
+#if NRF_SD_BLE_API_VERSION<5
+    uint32_t err_code = nrf_drv_spi_transfer(&spi2, tx, c, rx, rx?c:0);
+#else
+    // don't use nrf_drv_spi_transfer here because it truncates length to 8 bits! (nRF52840 can do >255)
+    nrfx_spim_xfer_desc_t const spim_xfer_desc = {
+        .p_tx_buffer = tx,
+        .tx_length   = c,
+        .p_rx_buffer = rx,
+        .rx_length   = rx?c:0,
+    };
+    uint32_t err_code = nrfx_spim_xfer(&spi2.u.spim, &spim_xfer_desc, 0);
+#endif
+
+    if (err_code == NRF_SUCCESS)
+      return;
+    // if fails, we drop through as if we succeeded
+  }
+  spi2Sending = false;
+  if (spi2Callback) {
+    spi2Callback();
+    spi2Callback=NULL;
+  }
+}
+
+#endif // #if SPI_ENABLED
 
 static const nrf_drv_twi_t TWI1 = NRF_DRV_TWI_INSTANCE(1);
 #ifdef I2C_SLAVE
@@ -573,6 +617,10 @@ static NO_INLINE void jshPinSetFunction_int(JshPinFunction func, uint32_t pin) {
                  else if (fInfo==JSH_SPI_MOSI) NRF_SPI0->PSELMOSI = pin;
                  else NRF_SPI0->PSELSCK = pin;
                  break;
+  case JSH_SPI2: if (fInfo==JSH_SPI_MISO) NRF_SPI2->PSELMISO = pin;
+                 else if (fInfo==JSH_SPI_MOSI) NRF_SPI2->PSELMOSI = pin;
+                 else NRF_SPI2->PSELSCK = pin;
+                 break;
 #endif
   case JSH_I2C1: if (fInfo==JSH_I2C_SDA) NRF_TWI1->PSELSDA = pin;
                  else NRF_TWI1->PSELSCL = pin;
@@ -631,6 +679,8 @@ void jshResetPeripherals() {
 #if SPI_ENABLED
   spi0Sending = false;
   spi0Callback = NULL;
+  spi2Sending = false;
+  spi2Callback = NULL;
 #endif
 
 #ifdef SPIFLASH_BASE
@@ -1559,6 +1609,7 @@ bool jshIsEventForPin(IOEvent *event, Pin pin) {
 bool jshIsDeviceInitialised(IOEventFlags device) {
 #if SPI_ENABLED
   if (device==EV_SPI1) return spi0Initialised;
+  if (device==EV_SPI2) return spi2Initialised;
 #endif
   if (device==EV_I2C1) return twi1Initialised;
   if (DEVICE_IS_USART(device)) return uart[device-EV_SERIAL1].isInitialised;
@@ -1717,7 +1768,7 @@ void jshUSARTKick(IOEventFlags device) {
 /** Set up SPI, if pins are -1 they will be guessed */
 void jshSPISetup(IOEventFlags device, JshSPIInfo *inf) {
 #if SPI_ENABLED
-  if (device!=EV_SPI1) return;
+  if (device!=EV_SPI1 && device!=EV_SPI2) return;
 
   nrf_drv_spi_config_t spi_config = NRF_DRV_SPI_DEFAULT_CONFIG;
 
@@ -1752,27 +1803,56 @@ void jshSPISetup(IOEventFlags device, JshSPIInfo *inf) {
   if (jshIsPinValid(inf->pinMOSI))
     spi_config.mosi_pin = (uint32_t)pinInfo[inf->pinMOSI].pin;
 
-  if (spi0Initialised) nrf_drv_spi_uninit(&spi0);
-  spi0Initialised = true;
-  // No event handler means SPI transfers are blocking
+  if (device==EV_SPI1)
+  {
+    if (spi0Initialised) nrf_drv_spi_uninit(&spi0);
+    spi0Initialised = true;
+    // No event handler means SPI transfers are blocking
 #if NRF_SD_BLE_API_VERSION<5
-  uint32_t err_code = nrf_drv_spi_init(&spi0, &spi_config, spi0EvtHandler);
+    uint32_t err_code = nrf_drv_spi_init(&spi0, &spi_config, spi0EvtHandler);
 #else
-  uint32_t err_code = nrf_drv_spi_init(&spi0, &spi_config, spi0EvtHandler, NULL);
+    uint32_t err_code = nrf_drv_spi_init(&spi0, &spi_config, spi0EvtHandler, NULL);
 #endif
-  if (err_code != NRF_SUCCESS)
+
+    if (err_code != NRF_SUCCESS)
     jsExceptionHere(JSET_INTERNALERROR, "SPI Initialisation Error %d\n", err_code);
 
-  // nrf_drv_spi_init will set pins, but this ensures we know so can reset state later
-  if (jshIsPinValid(inf->pinSCK)) {
-    jshPinSetFunction(inf->pinSCK, JSH_SPI1|JSH_SPI_SCK);
+    // nrf_drv_spi_init will set pins, but this ensures we know so can reset state later
+    if (jshIsPinValid(inf->pinSCK)) {
+      jshPinSetFunction(inf->pinSCK, JSH_SPI1|JSH_SPI_SCK);
+    }
+    if (jshIsPinValid(inf->pinMOSI)) {
+      jshPinSetFunction(inf->pinMOSI, JSH_SPI1|JSH_SPI_MOSI);
+    }
+    if (jshIsPinValid(inf->pinMISO)) {
+      jshPinSetFunction(inf->pinMISO, JSH_SPI1|JSH_SPI_MISO);
+    }
+
+  } else if (device==EV_SPI2) {
+    if (spi2Initialised) nrf_drv_spi_uninit(&spi2);
+    spi2Initialised = true;
+    // No event handler means SPI transfers are blocking
+#if NRF_SD_BLE_API_VERSION<5
+    uint32_t err_code = nrf_drv_spi_init(&spi2, &spi_config, spi2EvtHandler);
+#else
+    uint32_t err_code = nrf_drv_spi_init(&spi2, &spi_config, spi2EvtHandler, NULL);
+#endif
+
+    if (err_code != NRF_SUCCESS)
+    jsExceptionHere(JSET_INTERNALERROR, "SPI Initialisation Error %d\n", err_code);
+
+    // nrf_drv_spi_init will set pins, but this ensures we know so can reset state later
+    if (jshIsPinValid(inf->pinSCK)) {
+      jshPinSetFunction(inf->pinSCK, JSH_SPI2|JSH_SPI_SCK);
+    }
+    if (jshIsPinValid(inf->pinMOSI)) {
+      jshPinSetFunction(inf->pinMOSI, JSH_SPI2|JSH_SPI_MOSI);
+    }
+    if (jshIsPinValid(inf->pinMISO)) {
+      jshPinSetFunction(inf->pinMISO, JSH_SPI2|JSH_SPI_MISO);
+    }
   }
-  if (jshIsPinValid(inf->pinMOSI)) {
-    jshPinSetFunction(inf->pinMOSI, JSH_SPI1|JSH_SPI_MOSI);
-  }
-  if (jshIsPinValid(inf->pinMISO)) {
-    jshPinSetFunction(inf->pinMISO, JSH_SPI1|JSH_SPI_MISO);
-  }
+
 #endif
 }
 
@@ -1781,54 +1861,95 @@ void jshSPISetup(IOEventFlags device, JshSPIInfo *inf) {
  * waits for data to be returned */
 int jshSPISend(IOEventFlags device, int data) {
 #if SPI_ENABLED
-  if (device!=EV_SPI1 || !jshIsDeviceInitialised(device)) return -1;
+  if ((device!=EV_SPI1 && device!=EV_SPI2)|| !jshIsDeviceInitialised(device)) return -1;
   jshSPIWait(device);
-#if defined(SPI0_USE_EASY_DMA)  && (SPI0_USE_EASY_DMA==1) && NRF52832
-  // Hack for https://infocenter.nordicsemi.com/topic/­errata_nRF52832_Rev2/ERR/nRF52832/Rev2/l­atest/anomaly_832_58.html?cp=4_2_1_0_1_8
-  // Can't use DMA for single bytes as it's broken
-  // Doesn't appear on NRF52840 or NRF52833 production parts
-#if NRF_SD_BLE_API_VERSION>5
-  NRF_SPI_Type *p_spi = (NRF_SPI_Type *)spi0.u.spi.p_reg;
-  NRF_SPIM_Type *p_spim = (NRF_SPIM_Type *)spi0.u.spim.p_reg;
-#else
-  NRF_SPI_Type *p_spi = (NRF_SPI_Type *)spi0.p_registers;
-  NRF_SPIM_Type *p_spim = (NRF_SPIM_Type *)spi0.p_registers;
-#endif
-  nrf_spim_disable(p_spim);
-  nrf_spi_enable(p_spi); // enable SPI mode (non-DMA)
-  nrf_spi_int_disable(p_spi, NRF_SPI_INT_READY_MASK);
-  nrf_spi_event_clear(p_spi, NRF_SPI_EVENT_READY);
-  // start transfer
-  spi0Sending = true;
-  nrf_spi_txd_set(p_spi, data);
-  // wait for rx data
-  while (!nrf_spi_event_check(p_spi, NRF_SPI_EVENT_READY)) {}
-  nrf_spi_event_clear(p_spi, NRF_SPI_EVENT_READY);
-  int rx = nrf_spi_rxd_get(p_spi);
-  spi0Sending = false;
-  nrf_spi_disable(p_spi);
-  nrf_spim_enable(p_spim); // enable SPIM mode (DMA)
-  return rx;
-#else
-  uint8_t tx = (uint8_t)data;
-  uint8_t rx = 0;
-  spi0Sending = true;
-  uint32_t err_code = nrf_drv_spi_transfer(&spi0, &tx, 1, &rx, 1);
-  if (err_code != NRF_SUCCESS) {
-    spi0Sending = false;
-    jsExceptionHere(JSET_INTERNALERROR, "SPI Send Error %d\n", err_code);
-  }
-  jshSPIWait(device);
-  return rx;
-#endif
-#endif
 
+  if (device==EV_SPI1) {
+#if defined(SPI0_USE_EASY_DMA)  && (SPI0_USE_EASY_DMA==1) && NRF52832
+    // Hack for https://infocenter.nordicsemi.com/topic/­errata_nRF52832_Rev2/ERR/nRF52832/Rev2/l­atest/anomaly_832_58.html?cp=4_2_1_0_1_8
+    // Can't use DMA for single bytes as it's broken
+    // Doesn't appear on NRF52840 or NRF52833 production parts
+#if NRF_SD_BLE_API_VERSION>5
+    NRF_SPI_Type *p_spi = (NRF_SPI_Type *)spi0.u.spi.p_reg;
+    NRF_SPIM_Type *p_spim = (NRF_SPIM_Type *)spi0.u.spim.p_reg;
+#else
+    NRF_SPI_Type *p_spi = (NRF_SPI_Type *)spi0.p_registers;
+    NRF_SPIM_Type *p_spim = (NRF_SPIM_Type *)spi0.p_registers;
+#endif
+    nrf_spim_disable(p_spim);
+    nrf_spi_enable(p_spi); // enable SPI mode (non-DMA)
+    nrf_spi_int_disable(p_spi, NRF_SPI_INT_READY_MASK);
+    nrf_spi_event_clear(p_spi, NRF_SPI_EVENT_READY);
+    // start transfer
+    spi0Sending = true;
+    nrf_spi_txd_set(p_spi, data);
+    // wait for rx data
+    while (!nrf_spi_event_check(p_spi, NRF_SPI_EVENT_READY)) {}
+    nrf_spi_event_clear(p_spi, NRF_SPI_EVENT_READY);
+    int rx = nrf_spi_rxd_get(p_spi);
+    spi0Sending = false;
+    nrf_spi_disable(p_spi);
+    nrf_spim_enable(p_spim); // enable SPIM mode (DMA)
+    return rx;
+#else
+    uint8_t tx = (uint8_t)data;
+    uint8_t rx = 0;
+    spi0Sending = true;
+    uint32_t err_code = nrf_drv_spi_transfer(&spi0, &tx, 1, &rx, 1);
+    if (err_code != NRF_SUCCESS) {
+      spi0Sending = false;
+      jsExceptionHere(JSET_INTERNALERROR, "SPI Send Error %d\n", err_code);
+    }
+    jshSPIWait(device);
+    return rx;
+#endif
+  } else if (device==EV_SPI2) {
+#if defined(SPI2_USE_EASY_DMA)  && (SPI2_USE_EASY_DMA==1) && NRF52832
+    // Hack for https://infocenter.nordicsemi.com/topic/­errata_nRF52832_Rev2/ERR/nRF52832/Rev2/l­atest/anomaly_832_58.html?cp=4_2_1_0_1_8
+    // Can't use DMA for single bytes as it's broken
+    // Doesn't appear on NRF52840 or NRF52833 production parts
+#if NRF_SD_BLE_API_VERSION>5
+    NRF_SPI_Type *p_spi = (NRF_SPI_Type *)spi2.u.spi.p_reg;
+    NRF_SPIM_Type *p_spim = (NRF_SPIM_Type *)spi2.u.spim.p_reg;
+#else
+    NRF_SPI_Type *p_spi = (NRF_SPI_Type *)spi2.p_registers;
+    NRF_SPIM_Type *p_spim = (NRF_SPIM_Type *)spi2.p_registers;
+#endif
+    nrf_spim_disable(p_spim);
+    nrf_spi_enable(p_spi); // enable SPI mode (non-DMA)
+    nrf_spi_int_disable(p_spi, NRF_SPI_INT_READY_MASK);
+    nrf_spi_event_clear(p_spi, NRF_SPI_EVENT_READY);
+    // start transfer
+    spi2Sending = true;
+    nrf_spi_txd_set(p_spi, data);
+    // wait for rx data
+    while (!nrf_spi_event_check(p_spi, NRF_SPI_EVENT_READY)) {}
+    nrf_spi_event_clear(p_spi, NRF_SPI_EVENT_READY);
+    int rx = nrf_spi_rxd_get(p_spi);
+    spi2Sending = false;
+    nrf_spi_disable(p_spi);
+    nrf_spim_enable(p_spim); // enable SPIM mode (DMA)
+    return rx;
+#else
+    uint8_t tx = (uint8_t)data;
+    uint8_t rx = 0;
+    spi2Sending = true;
+    uint32_t err_code = nrf_drv_spi_transfer(&spi2, &tx, 1, &rx, 1);
+    if (err_code != NRF_SUCCESS) {
+      spi2Sending = false;
+      jsExceptionHere(JSET_INTERNALERROR, "SPI Send Error %d\n", err_code);
+    }
+    jshSPIWait(device);
+    return rx;
+#endif
+  }
+#endif
 }
 
 /** Send 16 bit data through the given SPI device. */
 void jshSPISend16(IOEventFlags device, int data) {
 #if SPI_ENABLED
-  if (device!=EV_SPI1 || !jshIsDeviceInitialised(device)) return;
+  if ((device!=EV_SPI1 && device!=EV_SPI2) || !jshIsDeviceInitialised(device)) return;
   jshSPIWait(device);
   uint16_t tx = (uint16_t)data;
   jshSPISendMany(device, &tx, NULL, 2, NULL);
@@ -1840,46 +1961,89 @@ void jshSPISend16(IOEventFlags device, int data) {
  * will be async */
 bool jshSPISendMany(IOEventFlags device, unsigned char *tx, unsigned char *rx, size_t count, void (*callback)()) {
 #if SPI_ENABLED
-  if (device!=EV_SPI1 || !jshIsDeviceInitialised(device)) return false;
+  if ((device!=EV_SPI1 && device!=EV_SPI2)|| !jshIsDeviceInitialised(device)) return false;
+
+  if (device==EV_SPI1) {
 #if defined(SPI0_USE_EASY_DMA) && NRF52832
-  // Hack for https://infocenter.nordicsemi.com/topic/­errata_nRF52832_Rev2/ERR/nRF52832/Rev2/l­atest/anomaly_832_58.html?cp=4_2_1_0_1_8­
-  // Doesn't appear on NRF52840 or NRF52833 production parts
-  if (count==1) {
-    int r = jshSPISend(device, tx?*tx:-1);
-    if (rx) *rx = r;
-    if (callback) callback();
-    return true;
-  }
+    // Hack for https://infocenter.nordicsemi.com/topic/­errata_nRF52832_Rev2/ERR/nRF52832/Rev2/l­atest/anomaly_832_58.html?cp=4_2_1_0_1_8­
+    // Doesn't appear on NRF52840 or NRF52833 production parts
+    if (count==1) {
+      int r = jshSPISend(device, tx?*tx:-1);
+      if (rx) *rx = r;
+      if (callback) callback();
+      return true;
+    }
 #endif
-  jshSPIWait(device);
-  spi0Sending = true;
+    jshSPIWait(device);
+    spi0Sending = true;
 
-  size_t c = count;
-  if (c>SPI_MAXAMT) c=SPI_MAXAMT;
+    size_t c = count;
+    if (c>SPI_MAXAMT) c=SPI_MAXAMT;
 
-  spi0TxPtr = tx ? tx+c : 0;
-  spi0RxPtr = rx ? rx+c : 0;
-  spi0Cnt = count-c;
-  if (callback) spi0Callback = callback;
+    spi0TxPtr = tx ? tx+c : 0;
+    spi0RxPtr = rx ? rx+c : 0;
+    spi0Cnt = count-c;
+    if (callback) spi0Callback = callback;
 #if NRF_SD_BLE_API_VERSION<5
-  uint32_t err_code = nrf_drv_spi_transfer(&spi0, tx, c, rx, rx?c:0);
+    uint32_t err_code = nrf_drv_spi_transfer(&spi0, tx, c, rx, rx?c:0);
 #else
     // don't use nrf_drv_spi_transfer here because it truncates length to 8 bits! (nRF52840 can do >255)
-  nrfx_spim_xfer_desc_t const spim_xfer_desc = {
-      .p_tx_buffer = tx,
-      .tx_length   = c,
-      .p_rx_buffer = rx,
-      .rx_length   = rx?c:0,
-  };
-  uint32_t err_code = nrfx_spim_xfer(&spi0.u.spim, &spim_xfer_desc, 0);
+    nrfx_spim_xfer_desc_t const spim_xfer_desc = {
+        .p_tx_buffer = tx,
+        .tx_length   = c,
+        .p_rx_buffer = rx,
+        .rx_length   = rx?c:0,
+    };
+    uint32_t err_code = nrfx_spim_xfer(&spi0.u.spim, &spim_xfer_desc, 0);
 #endif
-  if (err_code != NRF_SUCCESS) {
-    spi0Sending = false;
-    jsExceptionHere(JSET_INTERNALERROR, "SPI Send Error %d\n", err_code);
-    return false;
+    if (err_code != NRF_SUCCESS) {
+      spi0Sending = false;
+      jsExceptionHere(JSET_INTERNALERROR, "SPI Send Error %d\n", err_code);
+      return false;
+    }
+    if (!callback) jshSPIWait(device);
+    return true;
+  } else if (device==EV_SPI2) {
+#if defined(SPI2_USE_EASY_DMA) && NRF52832
+    // Hack for https://infocenter.nordicsemi.com/topic/­errata_nRF52832_Rev2/ERR/nRF52832/Rev2/l­atest/anomaly_832_58.html?cp=4_2_1_0_1_8­
+    // Doesn't appear on NRF52840 or NRF52833 production parts
+    if (count==1) {
+      int r = jshSPISend(device, tx?*tx:-1);
+      if (rx) *rx = r;
+      if (callback) callback();
+      return true;
+    }
+#endif
+    jshSPIWait(device);
+    spi2Sending = true;
+
+    size_t c = count;
+    if (c>SPI_MAXAMT) c=SPI_MAXAMT;
+
+    spi2TxPtr = tx ? tx+c : 0;
+    spi2RxPtr = rx ? rx+c : 0;
+    spi2Cnt = count-c;
+    if (callback) spi2Callback = callback;
+#if NRF_SD_BLE_API_VERSION<5
+    uint32_t err_code = nrf_drv_spi_transfer(&spi2, tx, c, rx, rx?c:0);
+#else
+    // don't use nrf_drv_spi_transfer here because it truncates length to 8 bits! (nRF52840 can do >255)
+    nrfx_spim_xfer_desc_t const spim_xfer_desc = {
+        .p_tx_buffer = tx,
+        .tx_length   = c,
+        .p_rx_buffer = rx,
+        .rx_length   = rx?c:0,
+    };
+    uint32_t err_code = nrfx_spim_xfer(&spi2.u.spim, &spim_xfer_desc, 0);
+#endif
+    if (err_code != NRF_SUCCESS) {
+      spi2Sending = false;
+      jsExceptionHere(JSET_INTERNALERROR, "SPI Send Error %d\n", err_code);
+      return false;
+    }
+    if (!callback) jshSPIWait(device);
+    return true;
   }
-  if (!callback) jshSPIWait(device);
-  return true;
 #else
   return false;
 #endif
@@ -1897,7 +2061,11 @@ void jshSPISetReceive(IOEventFlags device, bool isReceive) {
 /** Wait until SPI send is finished, and flush all received data */
 void jshSPIWait(IOEventFlags device) {
 #if SPI_ENABLED
-  WAIT_UNTIL(!spi0Sending, "SPI0");
+  if (device==EV_SPI1) {
+    WAIT_UNTIL(!spi0Sending, "SPI0");
+  } else if (device==EV_SPI2) {
+    WAIT_UNTIL(!spi2Sending, "SPI2");
+  }
 #endif
 }
 #ifdef I2C_SLAVE
