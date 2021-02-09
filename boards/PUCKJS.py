@@ -48,7 +48,9 @@ info = {
      'DFU_PRIVATE_KEY=targets/nrf5x_dfu/dfu_private_key.pem',
      'DFU_SETTINGS=--application-version 0xff --hw-version 52 --sd-req 0x8C',
      'INCLUDE += -I$(ROOT)/libs/puckjs',
-     'WRAPPERSOURCES += libs/puckjs/jswrap_puck.c'
+     'WRAPPERSOURCES += libs/puckjs/jswrap_puck.c',
+     'JSMODULESOURCES+=libs/js/ESP8266WiFi_custom.js',
+     'JSMODULESOURCES+=libs/js/AT.min.js'
    ]
  }
 };
